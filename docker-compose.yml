@@ -1,0 +1,43 @@
+version: '3'
+
+services:
+    database:
+        restart: always
+        hostname: database
+        container_name: sleepdetect-database
+        networks:
+            - sleep-detector
+        image: timescale/timescaledb:latest-pg11
+        environment:
+            POSTGRES_USER: postgres
+            POSTGRES_PASSWORD: "postgresp@s55w0rd"
+            POSTGRES_DB: sleep_detector
+        volumes:
+            - ./database-data:/var/lib/postgresql/data
+    
+    detector:
+        restart: always
+        hostname: detector
+        container_name: sleepdetect-detector
+        ports:
+            - 5000:5000
+        networks:
+            - sleep-detector
+        build: .
+        image: sleepdetect-detector
+        environment:
+            DB_DATABASE: sleep_detector
+            DB_USERNAME: postgres
+            DB_PASSWORD: "postgresp@s55w0rd"
+            DB_HOST: database
+            DB_PORT: 5432
+            HR_VALID_LOW: 40
+            HR_VALID_HIGH: 85
+            WORKER_TICK_INTERVAL: 60
+            MINIMAL_SLEEP_HOURS: 3
+            ACTIVE_FLAG_TIMEOUT: 120
+            HR_THRESHOLD_SAMPLES: 7
+
+networks:
+  sleep-detector:
+
