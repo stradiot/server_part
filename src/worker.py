@@ -4,6 +4,7 @@ from datetime import datetime
 from statistics import median
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import requests
 
 """ configuration """
 
@@ -18,6 +19,7 @@ WORKER_TICK_INTERVAL = int(os.getenv("WORKER_TICK_INTERVAL", "60"))
 MINIMAL_SLEEP_HOURS  = int(os.getenv("MINIMAL_SLEEP_HOURS", "3"))
 ACTIVE_FLAG_TIMEOUT  = int(os.getenv("ACTIVE_FLAG_TIMEOUT", "120"))
 HR_THRESHOLD_SAMPLES = int(os.getenv("HR_THRESHOLD_SAMPLES", "7"))
+WEBHOOK_HOST_URL     = os.getenv("WEBHOOK_HOST_URL", "http://localhost/sleep_detect")
 
 class Worker:
     def __init__(self):
@@ -28,6 +30,7 @@ class Worker:
         self.avg_sleep_cnt          = 0
         self.active_flag            = False
         self.reset_flag_thread      = None
+        self.sleep_sent             = False
         self.db_connection_settings = {
             'dbname':     DB_DATABASE,
             'user':       DB_USERNAME,
@@ -143,6 +146,17 @@ class Worker:
         sleep = self._check_for_sleep(act_hr)
 
         print("SLEEP", sleep, datetime.now())
+        if sleep and not self.sleep_sent:
+            requests.post(
+                WEBHOOK_HOST_URL, 
+                json={"sleep": True}, 
+                headers={"Content-Type": "application/json"}
+            )
+            self.sleep_sent = True
+            print("SLEEP DETECT SENT")
+        elif not sleep:
+            self.sleep_sent = False
+
         Timer(WORKER_TICK_INTERVAL, self._tick).start()
 
     def update_hr(self, heartrate):
