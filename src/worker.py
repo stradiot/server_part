@@ -1,10 +1,12 @@
 import os
+import math
 from threading import Timer
 from datetime import datetime
 from statistics import median
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import requests
+from numpy import percentile
 
 """ configuration """
 
@@ -14,20 +16,18 @@ DB_PASSWORD          = os.getenv("DB_PASSWORD", "postgres")
 DB_HOST              = os.getenv("DB_HOST", "localhost")
 DB_PORT              = int(os.getenv("DB_PORT", "5555"))
 HR_VALID_LOW         = int(os.getenv("HR_VALID_LOW", "40"))
-HR_VALID_HIGH        = int(os.getenv("HR_VALID_HIGH", "90"))
-WORKER_TICK_INTERVAL = int(os.getenv("WORKER_TICK_INTERVAL", "60"))
+HR_VALID_HIGH        = int(os.getenv("HR_VALID_HIGH", "80"))
+WORKER_TICK_INTERVAL = int(os.getenv("WORKER_TICK_INTERVAL", "120"))
 MINIMAL_SLEEP_HOURS  = int(os.getenv("MINIMAL_SLEEP_HOURS", "3"))
-ACTIVE_FLAG_TIMEOUT  = int(os.getenv("ACTIVE_FLAG_TIMEOUT", "120"))
+ACTIVE_FLAG_TIMEOUT  = int(os.getenv("ACTIVE_FLAG_TIMEOUT", "300"))
 HR_THRESHOLD_SAMPLES = int(os.getenv("HR_THRESHOLD_SAMPLES", "7"))
-WEBHOOK_HOST_URL     = os.getenv("WEBHOOK_HOST_URL", "http://localhost/sleep_detect")
+WEBHOOK_URL     = os.getenv("WEBHOOK_URL", "http://192.168.100.33:8123/api/webhook/sleep_detect")
 
 class Worker:
     def __init__(self):
-        self.hr_threshold           = 0
+        self.heartrate_threshold    = 100
         self.hr_arr                 = []
         self.sleep_start            = None
-        self.avg_sleep_hr           = 0
-        self.avg_sleep_cnt          = 0
         self.active_flag            = False
         self.reset_flag_thread      = None
         self.sleep_sent             = False
@@ -38,7 +38,7 @@ class Worker:
             'host':       DB_HOST,
             'port':       DB_PORT
         }
-        self._create_sleep_table()
+        self._create_db_tables()
 
     def _reset_active_flag(self):
         self.active_flag = False
@@ -55,18 +55,23 @@ class Worker:
 
         print("ACTIVE FLAG SET", self.active_flag, datetime.now())
 
-    def _create_sleep_table(self):
+    def _create_db_tables(self):
         with psycopg2.connect(**self.db_connection_settings) as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "CREATE TABLE IF NOT EXISTS sleep ("\
-                    "sleep_start timestamp with time zone NOT NULL,"\
-                    "sleep_end timestamp with time zone NOT NULL,"\
-                    "average_heartrate smallint NOT NULL);"
+                    "CREATE TABLE IF NOT EXISTS heartrate ("\
+                    "timestamp TIMESTAMPTZ NOT NULL,"\
+                    "value smallint NOT NULL);"
                 )
                 cursor.execute(
-                    "SELECT create_hypertable('sleep', 'sleep_start', if_not_exists => TRUE);"
+                    "CREATE TABLE IF NOT EXISTS sleep ("\
+                    "sleep_start TIMESTAMPTZ NOT NULL,"\
+                    "sleep_end TIMESTAMPTZ NOT NULL,"\
+                    "heartrate smallint NOT NULL);"
+                )
+                cursor.execute(
+                    "SELECT create_hypertable('heartrate', 'timestamp', if_not_exists => TRUE);"
                 )
                 conn.commit()
             except (psycopg2.Error) as error:
@@ -82,73 +87,97 @@ class Worker:
             except (psycopg2.Error) as error:
                 print(error.pgerror)
 
-    def _get_hr_threshold(self):
+    def _get_heartrate_threshold(self):
         with psycopg2.connect(**self.db_connection_settings) as conn:
-            cursor = conn.cursor()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             try:
                 cursor.execute(
-                    "SELECT average_heartrate AS hr FROM sleep ORDER BY sleep_start DESC LIMIT %s;", 
+                    "SELECT heartrate FROM sleep ORDER BY sleep_start DESC LIMIT %s;", 
                     (HR_THRESHOLD_SAMPLES,)
                 )
-                avg_hrs = [element for (element,) in cursor.fetchall()]
-                if avg_hrs:
-                    self.hr_threshold = max(avg_hrs)
+                heartrates = [row["heartrate"] for row in cursor.fetchall()]
+                return max(heartrates, default=0)
             except (psycopg2.Error) as error:
                 print(error.pgerror)
 
-    def _save_sleep(self, sleep_start, sleep_end, avg_hr):
+    def _get_sleep_heartrate(self, sleep_start, sleep_end):
+        with psycopg2.connect(**self.db_connection_settings) as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            try:
+                cursor.execute(
+                    "SELECT value FROM heartrate WHERE timestamp >= %s AND timestamp <= %s;",
+                    (sleep_start, sleep_end)
+                )
+                values = [row["value"] for row in cursor.fetchall()]
+                return values
+            except (psycopg2.Error) as error:
+                print(error.pgerror)
+    
+    def _save_sleep(self, sleep_start, sleep_end, hr):
         with psycopg2.connect(**self.db_connection_settings) as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT INTO sleep (sleep_start, sleep_end, average_heartrate) VALUES (%s, %s, %s);", 
-                    (sleep_start, sleep_end, avg_hr)
+                    "INSERT INTO sleep (sleep_start, sleep_end, heartrate) VALUES (%s, %s, %s);", 
+                    (sleep_start, sleep_end, hr)
                 )
                 conn.commit()
             except (psycopg2.Error) as error:
                 print(error.pgerror)
 
-    def _calc_hr(self):
-        if self.active_flag or not self.hr_arr:
-            return None
+    def _save_heartrate(self, timestamp, value):
+        with psycopg2.connect(**self.db_connection_settings) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO heartrate (timestamp, value) VALUES (%s, %s);", 
+                    (timestamp, value)
+                )
+                conn.commit()
+            except (psycopg2.Error) as error:
+                print(error.pgerror)
+
+    def _calc_heartrate(self):
+        if self.active_flag:
+            return -1
+        if not self.hr_arr:
+            return 0
 
         heartrate = median(self.hr_arr)
         self.hr_arr = []
         return heartrate
 
-    def _track_sleep(self, act_hr):
-        if act_hr:
-            if not self.sleep_start:
-                self.sleep_start = datetime.now()
-
-            self.avg_sleep_cnt += 1
-            self.avg_sleep_hr += (act_hr - self.avg_sleep_hr) / self.avg_sleep_cnt
-            print("RUNNING AVERAGE SLEEP HR", self.avg_sleep_hr, datetime.now())
-        elif self.sleep_start:
+    def _track_sleep(self, heartrate):
+        if heartrate > 0 and not self.sleep_start:
+            self.sleep_start = datetime.now()
+            print("STARTING SLEEP", datetime.now())
+        elif heartrate <=0 and self.sleep_start:
+            print("ENDING SLEEP", datetime.now())
             sleep_end = datetime.now()
 
             if (sleep_end - self.sleep_start).seconds // 60 >= MINIMAL_SLEEP_HOURS:
-                print("SAVING SLEEP", self.avg_sleep_hr)
-                self._save_sleep(self.sleep_start, sleep_end, self.avg_sleep_hr)
-                self.get_hr_threshold()
-
-            self.avg_sleep_hr  = 0
-            self.avg_sleep_cnt = 0
+                sleep_heartrates = self._get_sleep_heartrate(self.sleep_start, sleep_end)
+                sleep_heartrate = math.ceil(percentile(sleep_heartrates, 95))
+                print("SAVING SLEEP", sleep_heartrate, datetime.now())
+                self._save_sleep(self.sleep_start, sleep_end, sleep_heartrate)
+                self._get_heartrate_threshold()
+            
             self.sleep_start   = None
 
-    def _check_for_sleep(self, act_hr):
-        print("CHECKING FOR SLEEP", act_hr, self.hr_threshold)
-        return not self.active_flag and act_hr and act_hr <= self.hr_threshold
+    def _check_for_sleep(self, heartrate):
+        print("CHECKING FOR SLEEP", heartrate, self.heartrate_threshold)
+        return not self.active_flag and 0 < heartrate <= self.heartrate_threshold
 
     def _tick(self):
-        act_hr = self._calc_hr()
-        self._track_sleep(act_hr)
-        sleep = self._check_for_sleep(act_hr)
+        heartrate = self._calc_heartrate()
+        self._track_sleep(heartrate)
+        sleep = self._check_for_sleep(heartrate)
+        self._save_heartrate(datetime.now(), heartrate)
 
         print("SLEEP", sleep, datetime.now())
         if sleep and not self.sleep_sent:
             requests.post(
-                WEBHOOK_HOST_URL, 
+                WEBHOOK_URL, 
                 json={"sleep": True}, 
                 headers={"Content-Type": "application/json"}
             )
@@ -164,6 +193,6 @@ class Worker:
             self.hr_arr.append(heartrate)
 
     def run(self):
-        self._get_hr_threshold()
+        self._get_heartrate_threshold()
         self._tick()
 
