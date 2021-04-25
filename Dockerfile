@@ -4,6 +4,10 @@ MAINTAINER Martin Stradiot <xstradiotm@stuba.sk>
 # Variables
 ENV PYTHONUNBUFFERED=1
 
+# Libraries
+RUN apt update
+RUN apt install -y gcc libpq-dev
+
 # Code
 COPY requirements.txt /requirements.txt
 
@@ -17,4 +21,3 @@ ADD src/ /opt/sleep-detector
 
 # Start-up
 ENTRYPOINT ["python","/opt/sleep-detector/main.py"]
-
