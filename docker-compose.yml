@@ -37,6 +37,7 @@ services:
             MINIMAL_SLEEP_HOURS: 3
             ACTIVE_FLAG_TIMEOUT: 120
             HR_THRESHOLD_SAMPLES: 7
+            WEBHOOK_URL: "http://192.168.100.33:8123/api/webhook/sleep_detect"
 
 networks:
   sleep-detector:

@@ -16,6 +16,8 @@ def value_update():
 
     data = request.get_json()
 
+    print("INCOMING DATA", data)
+
     if "activity" in data and data["activity"]:
         worker.set_active_flag()
 
@@ -40,4 +42,3 @@ Thread(
     target=app.run,
     kwargs={'debug': True, 'use_reloader': False, 'host': "0.0.0.0"}
 ).start()
-

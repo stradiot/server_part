@@ -25,7 +25,7 @@ WEBHOOK_URL     = os.getenv("WEBHOOK_URL", "http://192.168.100.33:8123/api/webho
 
 class Worker:
     def __init__(self):
-        self.heartrate_threshold    = 100
+        self.heartrate_threshold    = 0
         self.hr_arr                 = []
         self.sleep_start            = None
         self.active_flag            = False
@@ -165,7 +165,7 @@ class Worker:
             self.sleep_start   = None
 
     def _check_for_sleep(self, heartrate):
-        print("CHECKING FOR SLEEP", heartrate, self.heartrate_threshold)
+        print("CHECKING FOR SLEEP", "HEARTRATE:", heartrate, "THRESHOLD:", self.heartrate_threshold)
         return not self.active_flag and 0 < heartrate <= self.heartrate_threshold
 
     def _tick(self):
@@ -195,4 +195,3 @@ class Worker:
     def run(self):
         self._get_heartrate_threshold()
         self._tick()
-
