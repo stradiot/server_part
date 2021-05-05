@@ -37,8 +37,12 @@ def sleep_history():
 
     return make_response(json.dumps(result), 200, {"Content-Type": "application/json"})
 
-worker.run()
+Thread(
+    target=worker.run
+).start()
+
 Thread(
     target=app.run,
     kwargs={'debug': True, 'use_reloader': False, 'host': "0.0.0.0"}
 ).start()
+

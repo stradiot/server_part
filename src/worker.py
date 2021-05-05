@@ -1,6 +1,6 @@
 import os
 import math
-from threading import Timer
+from threading import Timer, Event
 from datetime import datetime
 from statistics import median
 import psycopg2
@@ -139,6 +139,7 @@ class Worker:
 
     def _calc_heartrate(self):
         if self.active_flag:
+            self.hr_arr = []
             return -1
         if not self.hr_arr:
             return 0
@@ -151,24 +152,25 @@ class Worker:
         if heartrate > 0 and not self.sleep_start:
             self.sleep_start = datetime.now()
             print("STARTING SLEEP", datetime.now())
-        elif heartrate <=0 and self.sleep_start:
+        elif heartrate <= 0 and self.sleep_start:
             print("ENDING SLEEP", datetime.now())
             sleep_end = datetime.now()
 
-            if (sleep_end - self.sleep_start).seconds // 60 >= MINIMAL_SLEEP_HOURS:
+            if (sleep_end - self.sleep_start).seconds // 3600 >= MINIMAL_SLEEP_HOURS:
                 sleep_heartrates = self._get_sleep_heartrate(self.sleep_start, sleep_end)
                 sleep_heartrate = math.ceil(percentile(sleep_heartrates, 95))
                 print("SAVING SLEEP", sleep_heartrate, datetime.now())
                 self._save_sleep(self.sleep_start, sleep_end, sleep_heartrate)
                 self._get_heartrate_threshold()
             
-            self.sleep_start   = None
+            self.sleep_start = None
 
     def _check_for_sleep(self, heartrate):
         print("CHECKING FOR SLEEP", "HEARTRATE:", heartrate, "THRESHOLD:", self.heartrate_threshold)
         return not self.active_flag and 0 < heartrate <= self.heartrate_threshold
 
     def _tick(self):
+        print("HR ARR", self.hr_arr)
         heartrate = self._calc_heartrate()
         self._track_sleep(heartrate)
         sleep = self._check_for_sleep(heartrate)
@@ -180,18 +182,22 @@ class Worker:
                 WEBHOOK_URL, 
                 json={"sleep": True}, 
                 headers={"Content-Type": "application/json"}
-            )
+	    )
             self.sleep_sent = True
             print("SLEEP DETECT SENT")
         elif not sleep:
             self.sleep_sent = False
 
-        Timer(WORKER_TICK_INTERVAL, self._tick).start()
-
     def update_hr(self, heartrate):
+        print("HR_VALID_LOW", HR_VALID_LOW)
+        print("HR_VALID_HIGH", HR_VALID_HIGH)
         if HR_VALID_LOW <= heartrate <= HR_VALID_HIGH:
             self.hr_arr.append(heartrate)
+            print("APPENDING TO HR ARR", heartrate, self.hr_arr)
 
     def run(self):
         self._get_heartrate_threshold()
-        self._tick()
+        ticker = Event()
+        while not ticker.wait(WORKER_TICK_INTERVAL):
+            self._tick()
+
